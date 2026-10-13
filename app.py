@@ -1,6 +1,9 @@
 import asyncio
+import csv
+import io
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from collector import collector
 import database as db
@@ -27,7 +30,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Energy Consumption Analyzer API",
     description="Real-time and historical system power, CPU, memory, and process energy profiling API.",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan
 )
 
@@ -51,7 +54,8 @@ def root():
             "full_summary": "/api/summary",
             "alert_threshold": "/api/alerts/threshold?threshold=50.0",
             "historical_logs": "/api/history/logs?minutes=60",
-            "historical_stats": "/api/history/stats?minutes=60&tariff_rate=0.15"
+            "historical_stats": "/api/history/stats?minutes=60&tariff_rate=0.15",
+            "export_csv": "/api/history/export?minutes=60"
         }
     }
 
@@ -100,3 +104,34 @@ def get_history_stats(
 ):
     """Calculates aggregated metrics (Average Power, Peak Power, kWh, Estimated Cost, CO2 Footprint) over a given time range."""
     return db.get_historical_stats(minutes=minutes, electricity_rate=tariff_rate)
+
+@app.get("/api/history/export")
+def export_history_csv(minutes: int = Query(default=60, ge=1, le=1440)):
+    """Generates and downloads a CSV file containing historical energy logs for the past N minutes."""
+    logs = db.get_historical_logs(minutes=minutes)
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Write CSV Header
+    writer.writerow(["Timestamp", "Date Time", "CPU Percent (%)", "Memory Percent (%)", "Power (Watts)"])
+    
+    # Write Log Rows
+    for log in logs:
+        time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(log['timestamp']))
+        writer.writerow([
+            log['timestamp'],
+            time_str,
+            log['cpu_percent'],
+            log['memory_percent'],
+            log['power_watts']
+        ])
+    
+    csv_data = output.getvalue()
+    filename = f"energy_logs_{minutes}m.csv"
+    
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
