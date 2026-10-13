@@ -1,116 +1,179 @@
-# Energy Consumption Analyzer
+# ⚡ Energy Consumption Analyzer
 
-A full-stack, real-time hardware and software resource monitoring system that profiles CPU utilization, memory allocation, and software process activity to estimate live power draw (Watts), cumulative energy usage (kWh), electricity costs ($), and CO2 carbon footprint.
+A full-stack, real-time hardware and software energy profiling application. The system monitors live system metrics (CPU, RAM, estimated power draw in Watts, cumulative kWh usage), logs time-series historical data into SQLite, triggers high-power alerts, and visualizes trends via an interactive React dashboard.
 
----
+## 🛠️ Tech Stack
 
-## Key Features
+### **Backend**
 
-* Real-Time Power & CPU Profiling: Dynamic estimation of power consumption using CPU thermal TDP models and process sampling via psutil.
-* Top Energy-Consuming Processes: Identifies, ranks, and displays the top running software processes by CPU percentage and estimated power share.
-* Persistent Time-Series Storage: Automatically logs system metrics every 2 seconds into a local SQLite database for historical trend analysis.
-* High-Power Alert Thresholds: Displays instant visual alerts in the UI whenever power consumption exceeds user-configured thresholds (e.g., > 50 Watts).
-* Historical Analytics & Cost Calculation: Interactive charts with 10m, 1h, and 24h filters displaying average power, peak usage, cost estimates based on regional tariffs, and carbon footprint (grams of CO2).
-* Modern Dashboard: Built with React, Tailwind-style layouts, and Recharts streaming data visualizations.
+* **Python 3.11+**
 
----
+* **FastAPI** — High-performance RESTful API framework
 
-## System Architecture
+* **Uvicorn** — ASGI web server implementation
 
-  Hardware & OS            --->    Python Collector Agent    --->    SQLite Database
-  (psutil / System CPU)            (Thermal TDP Model)               (energy_history.db)
-                                             |                                |
-                                             v                                v
-                                   FastAPI REST Server       <---    Historical Analytics
-                                   (http://127.0.0.1:8000)           & Summary Queries
-                                             |
-                                             v
-                                   React Dashboard (Vite)
-                                   (http://localhost:5173)
+* **SQLite** — Lightweight time-series database for logging metrics
 
----
+* **psutil** — Cross-platform library for retrieving system utilization data
 
-## Tech Stack
+### **Frontend**
 
-* Backend: Python 3.9+, FastAPI, Uvicorn, psutil, asyncio
-* Database: SQLite3 (time-series logging)
-* Frontend: React 18, Vite, Recharts, Lucide React Icons
+* **React (Vite)** — Fast, component-based user interface
 
----
+* **Recharts** — Responsive time-series charts and visualizations
 
-## Quick Start Guide
+* **Lucide React** — Modern UI icons
 
-### Prerequisites
-* Python 3.9+
-* Node.js 16+ & npm
+### **DevOps & Infrastructure**
 
----
+* **Docker & Docker Compose** — Containerized multi-container deployment
 
-### 1. Backend Setup
+* **WSL 2** — Windows Subsystem for Linux backend integration
 
-1. Clone the repository and open the backend folder:
-   git clone https://github.com/your-username/energy-consumption-analyzer.git
-   cd energy-consumption-analyzer
+* **Docker Volumes** — Persistent storage for SQLite database files
 
-2. Create and activate a virtual environment:
-   * Windows:
-     python -m venv venv
-     .\venv\Scripts\activate
-   * macOS / Linux:
-     python -m venv venv
-     source venv/bin/activate
+## 🏗️ System Architecture
 
-3. Install Python dependencies:
-   pip install psutil fastapi uvicorn
+```
+┌──────────────────────────────────────────────────────────┐
+│                    React / Vite Frontend                 │
+│                   (http://localhost:5173)                │
+└─────────────────────────────┬────────────────────────────┘
+                              │ REST API Polls (1s)
+                              ▼
+┌──────────────────────────────────────────────────────────┐
+│                   FastAPI Backend API                    │
+│                   (http://localhost:8000)                │
+├─────────────────────────────┬────────────────────────────┤
+│  Async Background Logger    │  REST Endpoints            │
+│  (Polls metrics every 2s)   │  - Live Summary            │
+│                             │  - Top Processes           │
+│                             │  - Historical Stats        │
+│                             │  - CSV Export              │
+└──────────────┬──────────────┴────────────────────────────┘
+               │
+               ▼ Persistent Volume Mount (/app/data)
+┌──────────────────────────────────────────────────────────┐
+│                   SQLite Database                        │
+│                (energy_history.db)                       │
+└──────────────────────────────────────────────────────────┘
 
-4. Start the FastAPI REST server:
-   uvicorn app:app --reload --port 8000
-   * API Swagger Docs: http://127.0.0.1:8000/docs
-   * Live Summary Route: http://127.0.0.1:8000/api/summary
+```
 
----
+## 🚀 Getting Started (Docker Compose) - Recommended
 
-### 2. Frontend Setup
+### **Prerequisites**
 
-1. Open a new terminal tab, navigate to the frontend directory:
+* Windows 10/11 with **WSL 2** enabled
+
+* **Docker Desktop** installed and running
+
+### **1. Clone the Repository**
+
+```
+git clone https://github.com/student-kartikey/energy-consumption-analyzer.git
+cd energy-consumption-analyzer
+
+```
+
+### **2. Launch the Stack**
+
+Run Docker Compose to build images and spin up containers in detached mode:
+
+```
+docker compose up -d --build
+
+```
+
+### **3. Access the Applications**
+
+* **Frontend Dashboard:** <http://localhost:5173>
+
+* **Interactive API Docs (Swagger):** <http://localhost:8000/docs>
+
+* **Backend Status:** <http://localhost:8000/>
+
+### **4. Stop Containers**
+
+```
+docker compose down
+
+```
+
+## 💻 Manual Local Setup (Without Docker)
+
+### **Backend Setup**
+
+1. Navigate to the backend directory and set up a Python virtual environment:
+
+   ```
+   python -m venv venv
+   .\venv\Scripts\Activate.ps1
+   
+   ```
+
+2. Install Python dependencies:
+
+   ```
+   pip install -r requirements.txt
+   
+   ```
+
+3. Start the FastAPI development server:
+
+   ```
+   uvicorn app:app --reload
+   
+   ```
+
+### **Frontend Setup**
+
+1. Open a separate terminal, navigate to the `frontend` directory:
+
+   ```
    cd frontend
+   
+   ```
 
-2. Install frontend dependencies:
+2. Install Node packages:
+
+   ```
    npm install
-   npm install lucide-react recharts
+   
+   ```
 
-3. Start the Vite development server:
+3. Launch the Vite development server:
+
+   ```
    npm run dev
+   
+   ```
 
-4. Open the application:
-   Navigate to http://localhost:5173 to view the live dashboard.
+## 📡 API Endpoints Summary
 
----
+| Endpoint | Method | Description | 
+| ----- | ----- | ----- | 
+| `/` | `GET` | Health check & list of available routes | 
+| `/api/metrics/live` | `GET` | Current CPU %, RAM %, power draw (W), cumulative kWh | 
+| `/api/processes/top` | `GET` | Top N power-consuming processes | 
+| `/api/summary` | `GET` | Combined live system metrics and top process list | 
+| `/api/alerts/threshold` | `GET` | Dynamically set alert threshold in Watts (`?threshold=50.0`) | 
+| `/api/history/logs` | `GET` | Time-series historical energy logs (`?minutes=60`) | 
+| `/api/history/stats` | `GET` | Aggregate stats: average power, peak power, cost, CO2 | 
+| `/api/history/export` | `GET` | Export historical logs as a downloadable CSV file | 
 
-## API Endpoints
+## 📊 Features
 
-* GET /api/metrics/live — Current real-time CPU, RAM, power draw (W), and energy (kWh).
-* GET /api/processes/top — Top N running processes ranked by CPU usage and power share.
-* GET /api/summary — Combined payload of live metrics and top process list.
-* GET /api/alerts/threshold — Dynamically update the high-power alert threshold (?threshold=50.0).
-* GET /api/history/logs — Time-series energy logs from SQLite (?minutes=60).
-* GET /api/history/stats — Aggregated stats: Avg Power, Peak Power, Cost ($), and CO2 Footprint (g).
+* **Real-Time Monitoring:** 1-second live polling of system metrics and process energy shares.
 
----
+* **Dynamic Alerting:** Visually flags system metrics when power consumption exceeds configured limits.
 
-## Formulas Used
+* **Historical Trends:** Selectable range views (10 mins, 1 hour, 24 hours) displaying average draw, estimated electricity cost, and carbon footprint.
 
-* Power Draw (Watts):
-  Power = Idle Power + (Max TDP - Idle Power) * (CPU Usage % / 100)
+* **Data Portability:** Download time-series logs directly as CSV files.
 
-* Energy Consumption (kWh):
-  Energy = (Power in Watts * Time in Hours) / 1000
+* **Persistent Storage:** Docker named volumes retain SQLite database records across container restarts.
 
-* Carbon Footprint (grams of CO2):
-  CO2 = Energy in kWh * 475 (Grid Intensity Factor in g/kWh)
+## 📄 License
 
----
-
-## License
-
-This project is open-source and available under the MIT License.
+This project is open source and available under the [MIT License](LICENSE).
