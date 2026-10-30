@@ -1,40 +1,114 @@
 import asyncio
 import csv
 import io
+import json
 import time
+import psutil
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from collector import collector
+
 import database as db
 
-# Background task to continuously record energy metrics into SQLite
+# Global configuration for threshold limits
+ALERT_THRESHOLD_WATTS = 50.0
+
+
+def get_system_metrics():
+    """Captures system metrics and power estimates."""
+    global ALERT_THRESHOLD_WATTS
+
+    cpu_percent = psutil.cpu_percent(interval=None)
+    memory_info = psutil.virtual_memory()
+    memory_percent = memory_info.percent
+
+    # Baseline TDP model: Base System Draw (15W) + Scaled CPU Draw (up to 45W)
+    base_idle_watts = 15.0
+    max_cpu_watts = 45.0
+    power_watts = round(base_idle_watts + (cpu_percent / 100.0) * max_cpu_watts, 2)
+
+    energy_joules_total = round(power_watts * 3600, 2)
+    energy_kwh_total = round((power_watts * 1) / 1000, 4)
+
+    is_triggered = power_watts > ALERT_THRESHOLD_WATTS
+    alert_message = (
+        f"Power consumption ({power_watts} W) exceeded threshold limit of {ALERT_THRESHOLD_WATTS} W!"
+        if is_triggered
+        else "Normal operation"
+    )
+
+    return {
+        "timestamp": time.time(),
+        "cpu_percent": cpu_percent,
+        "memory_percent": memory_percent,
+        "power_watts": power_watts,
+        "energy_joules_total": energy_joules_total,
+        "energy_kwh_total": energy_kwh_total,
+        "alert": {
+            "triggered": is_triggered,
+            "threshold_watts": ALERT_THRESHOLD_WATTS,
+            "message": alert_message,
+        },
+    }
+
+
+def get_top_processes(limit: int = 5):
+    """Gathers top N power-consuming processes."""
+    max_cpu_watts = 45.0
+    processes = []
+    for proc in psutil.process_iter(["pid", "name", "cpu_percent"]):
+        try:
+            p_cpu = proc.info["cpu_percent"] or 0.0
+            p_watts = round((p_cpu / 100.0) * max_cpu_watts, 2)
+            processes.append({
+                "pid": proc.info["pid"],
+                "name": proc.info["name"] or "Unknown",
+                "cpu_percent": round(p_cpu, 1),
+                "estimated_power_watts": p_watts,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    return sorted(processes, key=lambda x: x["cpu_percent"], reverse=True)[:limit]
+
+
+def get_system_summary(limit: int = 5):
+    """Combined system metrics and process profiling payload."""
+    return {
+        "system": get_system_metrics(),
+        "top_processes": get_top_processes(limit=limit),
+    }
+
+
+# Background task to log energy metrics into SQLite
 async def bg_db_logger():
     while True:
         try:
-            metrics = collector.get_system_metrics()
+            metrics = get_system_metrics()
             db.save_reading(metrics)
         except Exception as e:
             print(f"Error logging to DB: {e}")
-        await asyncio.sleep(2.0)  # Log every 2 seconds
+        await asyncio.sleep(2.0)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize SQLite database and start background logging task
+    # Startup: Initialize SQLite database and background logger
     db.init_db()
     logger_task = asyncio.create_task(bg_db_logger())
     yield
-    # Shutdown: Cancel background task
+    # Shutdown: Cancel background logging task
     logger_task.cancel()
+
 
 app = FastAPI(
     title="Energy Consumption Analyzer API",
     description="Real-time and historical system power, CPU, memory, and process energy profiling API.",
     version="1.3.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# Enable CORS for local frontend development (e.g., React / Vite on port 5173 or 3000)
+# Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,95 +117,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def root():
     return {
         "status": "online",
         "service": "Energy Consumption Analyzer API",
         "endpoints": {
-            "live_metrics": "/api/metrics/live",
-            "top_processes": "/api/processes/top",
-            "full_summary": "/api/summary",
-            "alert_threshold": "/api/alerts/threshold?threshold=50.0",
+            "summary": "/api/summary",
             "historical_logs": "/api/history/logs?minutes=60",
             "historical_stats": "/api/history/stats?minutes=60&tariff_rate=0.15",
-            "export_csv": "/api/history/export?minutes=60"
-        }
+            "export_csv": "/api/history/export?minutes=60",
+            "websocket": "/ws/metrics",
+        },
     }
 
-# --- REAL-TIME ENDPOINTS ---
 
-@app.get("/api/metrics/live")
-def get_live_metrics():
-    """Returns current real-time CPU, RAM, power draw (W), cumulative energy (kWh), and alert status."""
-    return collector.get_system_metrics()
-
-@app.get("/api/processes/top")
-def get_top_processes(limit: int = Query(default=5, ge=1, le=20)):
-    """Returns top N running processes ranked by CPU usage and estimated power share."""
-    return collector.get_top_processes(limit=limit)
+# --- REST ENDPOINTS FOR REACT FRONTEND ---
 
 @app.get("/api/summary")
-def get_full_summary(limit: int = Query(default=5, ge=1, le=20)):
-    """Combined endpoint providing system metrics and top consuming processes in a single payload."""
-    return {
-        "system": collector.get_system_metrics(),
-        "top_processes": collector.get_top_processes(limit=limit)
-    }
+def api_summary(limit: int = Query(default=5, ge=1, le=20)):
+    return get_system_summary(limit=limit)
 
-# --- ALERT CONFIGURATION ENDPOINT ---
 
 @app.get("/api/alerts/threshold")
 def set_alert_threshold(threshold: float = Query(default=50.0, ge=10.0, le=500.0)):
-    """Dynamically updates the power consumption alert threshold (in Watts)."""
-    collector.alert_threshold = threshold
-    return {
-        "status": "updated",
-        "new_threshold_watts": threshold
-    }
+    global ALERT_THRESHOLD_WATTS
+    ALERT_THRESHOLD_WATTS = threshold
+    return {"status": "updated", "new_threshold_watts": threshold}
 
-# --- HISTORICAL DATA ENDPOINTS ---
 
 @app.get("/api/history/logs")
 def get_history_logs(minutes: int = Query(default=60, ge=1, le=1440)):
-    """Returns time-series energy logs from SQLite for the past N minutes (up to 24 hours)."""
     return db.get_historical_logs(minutes=minutes)
+
 
 @app.get("/api/history/stats")
 def get_history_stats(
     minutes: int = Query(default=60, ge=1, le=1440),
-    tariff_rate: float = Query(default=0.15, description="Electricity rate in USD per kWh")
+    tariff_rate: float = Query(default=0.15, description="Electricity rate in USD per kWh"),
 ):
-    """Calculates aggregated metrics (Average Power, Peak Power, kWh, Estimated Cost, CO2 Footprint) over a given time range."""
     return db.get_historical_stats(minutes=minutes, electricity_rate=tariff_rate)
+
 
 @app.get("/api/history/export")
 def export_history_csv(minutes: int = Query(default=60, ge=1, le=1440)):
-    """Generates and downloads a CSV file containing historical energy logs for the past N minutes."""
     logs = db.get_historical_logs(minutes=minutes)
-    
     output = io.StringIO()
     writer = csv.writer(output)
-    
-    # Write CSV Header
-    writer.writerow(["Timestamp", "Date Time", "CPU Percent (%)", "Memory Percent (%)", "Power (Watts)"])
-    
-    # Write Log Rows
+
+    writer.writerow([
+        "Timestamp", "CPU Usage (%)", "Memory Usage (%)",
+        "Power Draw (Watts)", "Cumulative Energy (Joules)", "Cumulative Energy (kWh)"
+    ])
+
     for log in logs:
-        time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(log['timestamp']))
         writer.writerow([
-            log['timestamp'],
-            time_str,
-            log['cpu_percent'],
-            log['memory_percent'],
-            log['power_watts']
+            log["timestamp"], log["cpu_percent"], log["memory_percent"],
+            log["power_watts"], log["energy_joules_total"], log["energy_kwh_total"]
         ])
-    
-    csv_data = output.getvalue()
-    filename = f"energy_logs_{minutes}m.csv"
-    
+
     return Response(
-        content=csv_data,
+        content=output.getvalue(),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename=energy_history_{minutes}m.csv"},
     )
+
+
+# --- WEBSOCKET ENDPOINT ---
+
+@app.websocket("/ws/metrics")
+async def websocket_metrics(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = get_system_summary()
+            await websocket.send_text(json.dumps(data))
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        print("Client disconnected from /ws/metrics")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        await websocket.close()
