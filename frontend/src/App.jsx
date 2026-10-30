@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
@@ -7,7 +7,8 @@ import {
   DollarSign, Leaf, TrendingUp, Bell, Download
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://localhost:8000';
+const WS_URL = 'ws://localhost:8000/ws/metrics';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
@@ -40,61 +41,80 @@ export default function App() {
     sample_count: 0
   });
 
-  // Poll Live Data every 1 second
+  const wsRef = useRef(null);
+
+  // Live WebSocket Connection Management
   useEffect(() => {
-    const fetchLiveSummary = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/summary`);
-        if (!res.ok) throw new Error("API Offline");
-        const data = await res.json();
+    let reconnectTimer;
 
-        setLiveMetrics(data.system);
-        setTopProcesses(data.top_processes || []);
+    const connectWebSocket = () => {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
         setIsLiveConnected(true);
+        console.log('Connected to WebSocket stream: /ws/metrics');
+      };
 
-        // Check for alert trigger to log into alert history
-        if (data.system.alert && data.system.alert.triggered) {
-          const timestamp = new Date(data.system.timestamp * 1000).toLocaleTimeString();
-          setAlertLogs(prev => [
-            { id: Date.now(), time: timestamp, watts: data.system.power_watts, msg: data.system.alert.message },
-            ...prev.slice(0, 9) // Keep last 10 alerts
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const system = data.system;
+          const processes = data.top_processes || [];
+
+          setLiveMetrics(system);
+          setTopProcesses(processes);
+
+          // Handle Alert Logging
+          if (system.alert && system.alert.triggered) {
+            const timestamp = new Date(system.timestamp * 1000).toLocaleTimeString();
+            setAlertLogs(prev => [
+              { id: Date.now(), time: timestamp, watts: system.power_watts, msg: system.alert.message },
+              ...prev.slice(0, 9) // Keep last 10 alert entries
+            ]);
+          }
+
+          // Append to Live Chart Stream
+          const timeLabel = new Date(system.timestamp * 1000).toLocaleTimeString();
+          setLiveChartData(prev => [
+            ...prev.slice(-19),
+            { time: timeLabel, power: system.power_watts, cpu: system.cpu_percent }
           ]);
+        } catch (err) {
+          console.error("Error parsing WebSocket payload:", err);
         }
+      };
 
-        const timeLabel = new Date(data.system.timestamp * 1000).toLocaleTimeString();
-        setLiveChartData(prev => [
-          ...prev.slice(-19),
-          { time: timeLabel, power: data.system.power_watts, cpu: data.system.cpu_percent }
-        ]);
-      } catch (err) {
+      ws.onerror = (error) => {
+        console.error('WebSocket Error:', error);
         setIsLiveConnected(false);
-      }
+      };
+
+      ws.onclose = () => {
+        setIsLiveConnected(false);
+        console.log('WebSocket connection closed. Attempting reconnect in 3s...');
+        // Auto-reconnect if server restarts or network hiccups
+        reconnectTimer = setTimeout(connectWebSocket, 3000);
+      };
     };
 
-    fetchLiveSummary();
-    const interval = setInterval(fetchLiveSummary, 1000);
-    return () => clearInterval(interval);
+    connectWebSocket();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
   }, []);
 
-  // Fetch Historical Data when Tab, Time Range, or Tariff Rate changes
+  // Fetch Historical Analytics (HTTP REST)
   useEffect(() => {
     if (activeTab !== 'history') return;
 
     const fetchHistory = async () => {
       try {
-        // Fetch logs for area chart
-        const logsRes = await fetch(`${API_BASE}/api/history/logs?minutes=${timeRange}`);
-        if (logsRes.ok) {
-          const logsData = await logsRes.json();
-          const formattedLogs = logsData.map(log => ({
-            ...log,
-            timeLabel: new Date(log.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-          }));
-          setHistoryLogs(formattedLogs);
-        }
-
-        // Fetch aggregated statistics
-        const statsRes = await fetch(`${API_BASE}/api/history/stats?minutes=${timeRange}&tariff_rate=${tariffRate}`);
+        const logsRes = await fetch(`${API_BASE}/api/history/logs?minutes=${timeRange}`); if (logsRes.ok) { const logsData = await logsRes.json(); const formattedLogs = logsData.map(log => ({ ...log, timeLabel: new Date(log.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) })); setHistoryLogs(formattedLogs); }  const statsRes = await fetch(`${API_BASE}/api/history/stats?minutes=${timeRange}&tariff_rate=${tariffRate}`);
         if (statsRes.ok) {
           const statsData = await statsRes.json();
           setHistoryStats(statsData);
@@ -156,7 +176,7 @@ export default function App() {
             padding: '6px 12px', borderRadius: '20px'
           }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: isLiveConnected ? '#34d399' : '#f87171' }}></span>
-            {isLiveConnected ? 'API Connected' : 'Backend Disconnected'}
+            {isLiveConnected ? 'WebSocket Live' : 'Disconnected'}
           </div>
         </div>
       </header>
